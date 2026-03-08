@@ -1,11 +1,14 @@
 # vLLM ROCm Debian Docker Images
 
+![Docker](https://img.shields.io/badge/-Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
 [![Debian](https://img.shields.io/badge/Debian-Bookworm-A81D33?style=flat-square&logo=debian)](https://www.debian.org/)
 [![ROCm](https://img.shields.io/badge/AMD-ROCm-ed1c24?style=flat-square&logo=amd)](https://rocm.docs.amd.com/)
 [![vLLM](https://img.shields.io/badge/vLLM-0.8.5_to_0.14-blue?style=flat-square)](https://github.com/vllm-project/vllm)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](https://opensource.org/licenses/MIT)
 
-Upstream vLLM provides [Ubuntu-based Docker images](https://hub.docker.com/r/rocm/vllm/tags) for AMD GPUs. However, for enterprise MLOps environments that prioritize extreme stability, predictability, and minimal OS footprints, [Debian](https://www.debian.org/doc/manuals/debian-faq/) is often the preferred choice.
+The ecosystem currently provides Ubuntu-based Docker images for AMD GPUs from both AMD ([rocm/vllm:v0.14.0_amd_dev](https://hub.docker.com/layers/rocm/vllm/v0.14.0_amd_dev/images/sha256-8447d72cf7d231887a6397d731ae0c81db10dd0788b1a9c0980fbbe2932e12e9)) and upstream vLLM ([vllm/vllm-openai-rocm:v0.15.1-rocm](https://hub.docker.com/layers/vllm/vllm-openai-rocm/v0.15.1-rocm/images/sha256-4c7fbd92fe07e4dab956d283b5d61b971f6242516647df6af06fdcbc34fddc2c)). However, for enterprise MLOps environments that prioritize extreme stability, predictability, and minimal OS footprints, [Debian](https://www.debian.org/doc/manuals/debian-faq/) is often the preferred choice.
+
+While AMD-maintained images offer deep hardware-specific tuning and patches, the official vLLM images typically track the latest upstream features and bug fixes. By building custom images using the workflow in this repository, you achieve the best of both worlds: pairing the exact ROCm versions and AMD-specific optimizations you need with the newest upstream vLLM commits.
 
 This repo provides optimized, production-ready Dockerfiles to build Debian-based (Bookworm) images for running vLLM on AMD Instinct GPUs.
 
