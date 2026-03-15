@@ -111,6 +111,20 @@ Processed prompts: 100%|██████████████████�
  That is my dad.
 ```
 
+### 4. Bonus Tip: Optimize inference
+Congratulations on successfully building and running the model-server. This is only the first step; maximizing throughput requires further optimizations. As a bonus, below is a generalized, production-tested example config used to achieve massive speedups on an MI300X (gfx942) GPU for prefill-heavy workloads (such as generating high-quality embeddings with `Qwen3-Embedding` model for: semantic search, document similarity, large-scale vector indexing, etc).
+
+**Environment Variables (Container & Build level):**
+* `VLLM_ROCM_USE_AITER=1`: Enables the AI Tensor Engine for ROCm ([AITER](https://github.com/ROCm/aiter)), which provides massive speedups via MI300X-specific matrix core optimizations.
+* `VLLM_USE_TRITON_FLASH_ATTN=0`: Disables Triton-based attention to ensure the engine fully utilizes the AITER backend.
+* `MAX_JOBS=1`: Restricts the `ninja` build system to a single compilation thread. JIT-compiling AITER kernels is highly memory-intensive; restricting concurrency prevents k8s pods (e.g those with 16Gi RAM limits) from triggering OOM kills during the initial startup build.
+
+**vLLM Engine Arguments (`vllm serve ...`):**
+* `--max-model-len=32768`: Matches the model's sequence length limit, enabling the indexing of entire articles/documents without losing semantic information near the end of the text.
+* `--max-num-batched-tokens=32768`: Matches the model length to ensure the engine can process at least one full-length article/document in a single pass, or efficiently pack hundreds of shorter search queries together. Leaving this at the lower default can bottleneck throughput.
+* `--enable-prefix-caching=False`: Disabled because embedding/search workloads typically process highly unique documents with little to no shared prompt overlap. Disabling it avoids unnecessary memory tracking overhead and frees up KV cache space for larger batches.
+* `--trust-remote-code=False`: A strict security best practice for production environments. Models should be loaded from secure internal object storage (e.g Ceph/Swift) rather than directly downloading and executing arbitrary code from the HuggingFace repos at runtime.
+
 ## Final Note
 
 I originally developed these Dockerfiles while working as a Machine Learning Engineer at the Wikimedia Foundation. Moving LLM inference workloads into production required resolving strict constraints around container OS standards (Debian) and registry compressed-layer limits, challenges that the default upstream Ubuntu images didn't address natively.
