@@ -151,6 +151,7 @@ RUN groupadd -g 109 render \
 WORKDIR /srv
 
 # Add AMD ROCm repositories and keys, and install minimal runtime ROCm libs and Python tooling
+# Also install ROCm build dependencies to support AITER kernel compilation. (see: https://phabricator.wikimedia.org/T419650)
 RUN mkdir -p /etc/apt/keyrings \
     && apt-get update -q \
     && apt-get install -q -y --no-install-recommends wget gnupg ca-certificates apt-transport-https \
@@ -160,6 +161,7 @@ RUN mkdir -p /etc/apt/keyrings \
     && apt-get update -q \
     && apt-get install -q -y \
     libopenmpi-dev libpci-dev libc6-dev rocm-smi-lib hip-dev rccl python3-dev ca-certificates gcc \
+    libdrm-amdgpu1 g++ rocm-dev rocm-device-libs hipsparse-dev rocthrust-dev rocprim-dev rocblas-dev hipblas-dev rocsparse-dev hipblaslt-dev hipsolver-dev \
     && apt-get purge --auto-remove -y wget gnupg \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
