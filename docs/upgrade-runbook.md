@@ -21,8 +21,13 @@ Step-by-step procedure for porting a new upstream vLLM release to the WMF Debian
                       └────────┬────────────┘
                                │
                       ┌────────▼────────────┐
-                      │ 3. Port upstream    │  edit Dockerfile manually
-                      │    changes          │
+                      │ 3a. Sync versions   │  scripts/sync-versions.sh
+                      │     (versions.env)  │  → auto-bumps pins, preserves archs
+                      └────────┬────────────┘
+                               │
+                      ┌────────▼────────────┐
+                      │ 3b. Triage diff     │  scripts/plan-upgrade.sh
+                      │  AUTO/ENV/STAGE/... │  → only edit DF for ENV + CONFLICT
                       └────────┬────────────┘
                                │
                       ┌────────▼────────────┐
@@ -32,7 +37,7 @@ Step-by-step procedure for porting a new upstream vLLM release to the WMF Debian
                                │
                       ┌────────▼────────────┐
                       │ 5. Generate WMF     │  scripts/generate-wmf-template.sh
-                      │    template         │
+                      │    template (+check)│  → self-checks vs committed
                       └────────┬────────────┘
                                │
                       ┌────────▼────────────┐
@@ -93,48 +98,78 @@ Also review the [vLLM release page](https://github.com/vllm-project/vllm/release
 ./scripts/scaffold-version.sh vllm0.15-rocm7.0.0
 ```
 
-This copies the latest `generic/` directory into a new one. You'll update the version strings in the next step.
+This copies the latest `generic/` directory (Dockerfile **and** `versions.env`) into a
+new one. In the new flow you rarely hand-edit the Dockerfile — you edit
+`versions.env` (next step), and the Dockerfile consumes it via named ARGs.
 
 ---
 
-## Step 3: Port the Generic Dockerfile
+## Step 3: Update versions.env, then triage the structural diff
 
-Edit the new `generic/<version>/Dockerfile`. Key files to reference:
+The Dockerfile no longer contains hardcoded versions — every pinned value
+(`MORI_BRANCH`, `FA_BRANCH`, `AITER_BRANCH`, `VLLM_REF`, `TORCH_SPEC`,
+`BASE_IMAGE`, …) lives in `generic/<version>/versions.env`. An upgrade is
+therefore two sub-steps: **sync the version pins**, then **triage everything
+structural**.
 
-| What | Where |
-|---|---|
-| Upstream base | `https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base` |
-| Upstream runtime | `https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm` |
-| Our previous version | `generic/<previous-version>/Dockerfile` |
+### 3a. Sync version pins from upstream
 
-**Checklist of things to update:**
+```bash
+./scripts/sync-versions.sh <version> <upstream-ref>
+# e.g. ./scripts/sync-versions.sh vllm0.22-rocm7.2.2 v0.22.0
+```
 
-- [ ] `BASE_IMAGE` — Debian Bookworm snapshot date
-- [ ] `ROCM_VERSION` — if ROCm version changed
-- [ ] `PYTORCH_ROCM_ARCH` — ensure both gfx90a and gfx942 are listed
-- [ ] PyTorch wheel URL (`--index-url`) — must match ROCm version
-- [ ] PyTorch version (`torch==X.Y.Z+rocmA.B`) — must be available at the index
-- [ ] `setuptools` version pin — check if upstream changed it
-- [ ] MoRi commit hash (`git checkout <hash>`) — update if needed
-- [ ] FlashAttention commit hash — update if needed
-- [ ] aiter commit hash — update if needed (note: gfx90a currently unsupported)
-- [ ] vLLM commit hash — the specific commit you are porting
-- [ ] vLLM `requirements/rocm.txt` — may have new deps
-- [ ] Performance env vars (`HIP_FORCE_DEV_KERNARG`, etc.) — carry over any new ones
-- [ ] `torch-libs-chunker` stage — keep this; it's needed for WMF registry limits
-- [ ] Static library cleanup (`rm -f /opt/rocm-*/lib/*.a`) — keep this
-- [ ] `torchvision` uninstall — keep this to reduce image size
+This reads upstream's component ARGs at that ref and writes
+`versions.env.new` with the bumps applied. It:
 
-**⚠️ When ROCm version changes**, you also need:
-- [ ] The new ROCm GPG key URL (verify it hasn't changed)
-- [ ] The new ROCm repo path (`https://repo.radeon.com/rocm/apt/<version>`)
-- [ ] Check `/opt/rocm-X.Y.Z/` path — may differ from previous version
-- [ ] `amd_smi` path — typically `/opt/rocm-X.Y.Z/share/amd_smi`
+- **auto-bumps** `FA_BRANCH`, `AITER_BRANCH`, `MORI_BRANCH` when upstream moved them;
+- **leaves GPU-arch keys untouched** (`PYTORCH_ROCM_ARCH`, `*_GPU_ARCHS`,
+  `*_GPU_TARGETS`) and tags them `# REVIEW` — confirm against current hardware
+  (MI210=gfx90a, MI300X=gfx942, **MI350=gfx950 coming soon**);
+- **prints hints** for `BASE_IMAGE` / PyTorch / Triton, which need a human to
+  pick the matching Debian base + torch wheel.
 
-**⚠️ PyTorch index stability:**
-- Use the stable index (`https://download.pytorch.org/whl/rocm7.0`), NOT the nightly index.
-- Nightly wheels disappear after a few months (see T385173, P87924).
-- Verify the wheel exists before committing: `pip install --dry-run torch==X.Y.Z+rocmA.B --index-url ...`
+Review `versions.env.new`, adjust the `# REVIEW` arch lines if hardware
+changed, set `TORCH_SPEC`/`TORCH_INDEX_URL` and `BASE_IMAGE`/`ROCM_VERSION`/
+`ROCM_PATH_VERSION` per the hints, then:
+
+```bash
+mv generic/<version>/versions.env.new generic/<version>/versions.env
+```
+
+### 3b. Triage the structural changes
+
+```bash
+./scripts/plan-upgrade.sh <version> <upstream-ref> <baseline-ref>
+# e.g. ./scripts/plan-upgrade.sh vllm0.22-rocm7.2.2 v0.22.0 v0.14.0
+```
+
+This categorises the upstream diff so you only act on what matters:
+
+| Category | Meaning | Action |
+|---|---|---|
+| `[AUTO]` | version-pin bump | already handled by 3a — just confirm |
+| `[ENV]` | new ENV var | copy into the runtime ENV block if relevant (e.g. `HSA_ENABLE_IPC_MODE_LEGACY=1`) |
+| `[STAGE]` | new upstream build stage | almost always **SKIP** — we only build builder/chunker/mori/fa/aiter/vllm |
+| `[DEP]` | new dep inside a build step | review only if it lands in a stage we build |
+| `[CONFLICT]` | touches a WMF delta (apt/repo, base, chunker, arch, perf ENV) | **hand-reconcile** — never copy blindly |
+
+> **Note on `[STAGE]` SKIP vs its contents.** Skipping an upstream stage (e.g.
+> `final`, `vllm-openai`) does *not* mean ignoring the ENV vars defined inside
+> it — those surface separately under `[ENV]`. Skip the stage, but scan its ENV.
+
+**Only edit the Dockerfile** for `[ENV]` additions and `[CONFLICT]`
+reconciliation. Version bumps never require touching it. Things to preserve
+through any structural edit:
+
+- [ ] `torch-libs-chunker` stage — needed for the WMF registry layer limit
+- [ ] Static library cleanup (`rm -f /opt/rocm-*/lib/*.a`)
+- [ ] `torchvision` uninstall
+
+**⚠️ PyTorch index stability:** use the stable index
+(`https://download.pytorch.org/whl/rocmX.Y`), NOT nightly — nightly wheels
+disappear after a few months (T385173, P87924). Verify the wheel exists:
+`pip install --dry-run torch==X.Y.Z+rocmA.B --index-url ...`
 
 ---
 
@@ -174,18 +209,33 @@ print(llm.generate('Hello, world!', SamplingParams(max_tokens=5))[0].outputs[0].
 ## Step 5: Generate the WMF Template
 
 ```bash
-./scripts/generate-wmf-template.sh <version>
+./scripts/generate-wmf-template.sh <version> \
+  --base-tag <amd-pytorch-common-tag> \
+  --rocm-suffix <NN> \
+  --check wmf/<short-name>/Dockerfile.template   # optional, when updating an existing image
 ```
 
-This produces `wmf/<short-name>/Dockerfile.template`. **Review it carefully** — the script handles mechanical conversions but you MUST verify:
+Example:
 
-- [ ] Base image tag is current (check `docker-registry.wikimedia.org/amd-pytorch-common/tags/`)
-- [ ] APT source line points to the correct WMF mirror directory
-- [ ] All `COPY --from=` lines have `--chown=somebody`
-- [ ] `USER somebody` is present before `pip install`
-- [ ] Proxy env vars are present in both builder and runtime stages
-- [ ] Runtime ROCm install is minimal (no build tools beyond what's needed for AITER JIT)
-- [ ] `apt-get clean` and `rm -rf /var/lib/apt/lists/*` are present
+```bash
+./scripts/generate-wmf-template.sh vllm0.14-rocm7.0.0 \
+  --base-tag 0.0.1-2-20260118 --rocm-suffix 70 \
+  --check wmf/vllm014/Dockerfile.template
+```
+
+The converter is driven by `versions.env` and applies the fixed WMF deltas
+(base image, `apt.wikimedia.org` mirror, proxy ARG/ENV, `--chown=somebody`,
+`USER somebody`, render-group, runtime build-dep trimming, 12 GB header). If
+`--check` is given, it self-verifies that the generated template has the **same
+instruction set** as the reference and reports any drift (ordering differences
+are flagged as functionally equivalent, missing/extra instructions fail).
+
+**Still review before committing:**
+
+- [ ] Base image tag is current (`docker-registry.wikimedia.org/amd-pytorch-common/tags/`)
+- [ ] `--rocm-suffix` matches the WMF mirror directory (`thirdparty/amd-rocmNN`)
+- [ ] Self-check passed (set-equal; ordering-only diffs are OK)
+- [ ] GPU archs in `versions.env` match current hardware (MI210/MI300X/MI350)
 
 ---
 

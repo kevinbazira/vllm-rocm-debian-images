@@ -5,14 +5,30 @@
 # separate to avoid hitting the 4GB (compressed)         #
 # Docker layer limit required by the Wikimedia Docker    #
 # registry.                                              #
+#                                                        #
+# All version-pinned values are declared as ARGs below   #
+# and mirrored in versions.env. Do NOT hardcode versions #
+# in RUN lines.                                          #
 ##########################################################
 
+# --- version-pinned build args (defaults mirror versions.env) ---------
 ARG BASE_IMAGE=debian:bookworm-20250428
+ARG ROCM_VERSION=6.3.1
+ARG AMDGPU_VERSION=6.3.1
+ARG PYTORCH_ROCM_ARCH=gfx90a
+ARG TORCH_SPEC=torch==2.8.0+rocm6.3
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/rocm6.3
+ARG FA_BRANCH=1a7f4dfa
+ARG FA_GPU_ARCHS=gfx90a
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_BRANCH=main
+ARG VLLM_REF=c53e073
+
 FROM ${BASE_IMAGE} AS builder
 
 # Mirror upstream: pin ROCm packages and create 'render' group
-ARG ROCM_VERSION=6.3.1
-ARG AMDGPU_VERSION=6.3.1
+ARG ROCM_VERSION
+ARG AMDGPU_VERSION
 ARG APT_PREF="Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600"
 RUN mkdir -p /app \
     && groupadd -g 109 render \
@@ -37,10 +53,11 @@ RUN mkdir -p /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 # Set environment for ROCm and vLLM
+ARG PYTORCH_ROCM_ARCH
 ENV ROCM_PATH=/opt/rocm \
     VLLM_TARGET_DEVICE=rocm \
     # For more details on AMD GPU architecures like gfx90a, see: https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html
-    PYTORCH_ROCM_ARCH=gfx90a \
+    PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH} \
     PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/app/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
 
@@ -52,8 +69,10 @@ ENV TMPDIR=/opt/tmp
 
 # Install ROCm-enabled PyTorch (into the venv)
 # Using the stable index instead of the nightly index as it's more stable. (see: https://phabricator.wikimedia.org/P87924)
-RUN pip install --no-cache-dir --pre torch==2.8.0+rocm6.3 \
-    --index-url https://download.pytorch.org/whl/rocm6.3 \
+ARG TORCH_SPEC
+ARG TORCH_INDEX_URL
+RUN pip install --no-cache-dir --pre ${TORCH_SPEC} \
+    --index-url ${TORCH_INDEX_URL} \
     --extra-index-url https://pypi.org/simple
 
 # Chunk entire hipblaslt and rocblas directories from PyTorch installation
@@ -90,12 +109,14 @@ RUN pip install --no-cache-dir setuptools_scm packaging \
 
 # Build FlashAttention in a separate stage
 FROM builder AS flashattention-builder
+ARG FA_BRANCH
+ARG FA_GPU_ARCHS
 RUN git clone https://github.com/Dao-AILab/flash-attention.git /app/flash-attn \
     && cd /app/flash-attn \
-    && git checkout 1a7f4dfa \
+    && git checkout ${FA_BRANCH} \
     && git submodule update --init \
     # For more details on AMD GPU architecures like gfx90a, see: https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html
-    && GPU_ARCHS=gfx90a python3 setup.py bdist_wheel \
+    && GPU_ARCHS=${FA_GPU_ARCHS} python3 setup.py bdist_wheel \
     && mkdir -p /app/wheels \
     && mv dist/*.whl /app/wheels \
     && cd /app \
@@ -103,11 +124,12 @@ RUN git clone https://github.com/Dao-AILab/flash-attention.git /app/flash-attn \
 
 # Build vLLM in a separate stage
 FROM builder AS vllm-builder
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_BRANCH=main
+ARG VLLM_REPO
+ARG VLLM_BRANCH
+ARG VLLM_REF
 RUN git clone --branch ${VLLM_BRANCH} ${VLLM_REPO} /app/vllm \
     && cd /app/vllm \
-    && git checkout c53e073 \
+    && git checkout ${VLLM_REF} \
     && git submodule update --init \
     && pip install --no-cache-dir -r requirements/rocm.txt \
     && python3 setup.py bdist_wheel \
