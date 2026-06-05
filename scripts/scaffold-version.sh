@@ -19,6 +19,7 @@ GENERIC_DIR="$REPO_ROOT/generic"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "[$(date '+%H:%M:%S')] $*"; }
+warn() { echo "WARNING: $*" >&2; }
 
 # --- argument parsing ------------------------------------------------------
 
@@ -80,16 +81,29 @@ info "Scaffolding $NEW_VERSION from $FROM_VERSION ..."
 mkdir -p "$DST_DIR"
 cp "$SRC_DIR/Dockerfile" "$DST_DIR/Dockerfile"
 
-info "Created $DST_DIR/Dockerfile"
+# Copy the version manifest too — in the new flow this is the file you edit
+# (sync-versions.sh / generate-wmf-template.sh both require it to exist).
+if [ -f "$SRC_DIR/versions.env" ]; then
+  cp "$SRC_DIR/versions.env" "$DST_DIR/versions.env"
+  info "Created $DST_DIR/Dockerfile and $DST_DIR/versions.env"
+else
+  warn "No versions.env in $SRC_DIR — copied Dockerfile only."
+  warn "Create $DST_DIR/versions.env before running sync-versions.sh."
+  info "Created $DST_DIR/Dockerfile"
+fi
+
 info ""
 info "Next steps:"
-info "  1. Edit $DST_DIR/Dockerfile"
-info "     - Update ROCM_VERSION, PyTorch version, vLLM commit hash"
-info "     - Update MoRI / FlashAttention / aiter commit hashes"
-info "     - Update BASE_IMAGE Debian snapshot date"
-info "     - Apply any upstream Dockerfile changes from check-upstream.sh"
-info "  2. Build and test the image:"
-info "     docker build --network=host -t vllm-rocm-debian:$NEW_VERSION ./generic/$NEW_VERSION"
-info "  3. Run the smoke test (see docs/upgrade-runbook.md)"
-info "  4. When verified, commit:"
-info "     git add generic/$NEW_VERSION && git commit -m 'add $NEW_VERSION generic Dockerfile'"
+info "  1. Sync version pins from upstream:"
+info "       ./scripts/sync-versions.sh $NEW_VERSION <upstream-ref>"
+info "     Review versions.env.new (set BASE_IMAGE/ROCM_VERSION/TORCH_SPEC per"
+info "     the printed hints; confirm GPU archs), then:"
+info "       mv generic/$NEW_VERSION/versions.env.new generic/$NEW_VERSION/versions.env"
+info "  2. Triage structural upstream changes:"
+info "       ./scripts/plan-upgrade.sh $NEW_VERSION <upstream-ref> <baseline-ref>"
+info "     Only edit the Dockerfile for [ENV] additions and [CONFLICT] items."
+info "  3. Build and test the image:"
+info "       docker build --network=host -t vllm-rocm-debian:$NEW_VERSION ./generic/$NEW_VERSION"
+info "  4. Run the smoke test (see docs/upgrade-runbook.md)"
+info "  5. When verified, commit:"
+info "       git add generic/$NEW_VERSION && git commit -m 'add $NEW_VERSION generic Dockerfile + versions.env'"

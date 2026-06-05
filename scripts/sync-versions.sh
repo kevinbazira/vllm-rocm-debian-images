@@ -8,8 +8,9 @@
 # PROPOSED versions.env.new for review.
 #
 # What it DOES sync (these track upstream):
-#   TRITON / PYTORCH (-> TORCH_SPEC hint), FA_BRANCH, AITER_BRANCH, MORI_BRANCH,
-#   VLLM_REF, BASE_IMAGE (-> ROCM_VERSION hint).
+#   FA_BRANCH, AITER_BRANCH, MORI_BRANCH, VLLM_REF (synced directly) and
+#   ROCM_VERSION, ROCM_PATH_VERSION, TORCH_INDEX_URL, TORCH_SPEC (derived from
+#   upstream BASE_IMAGE + PYTORCH_BRANCH strings).
 #
 # What it DELIBERATELY does NOT overwrite (these are WMF/hardware-owned):
 #   PYTORCH_ROCM_ARCH, *_GPU_ARCHS, *_GPU_TARGETS — your target AMD GPUs.
@@ -94,12 +95,44 @@ sync_key() { # sync_key <our_key> <upstream_value>
 sync_key FA_BRANCH    "$U_FA"
 sync_key AITER_BRANCH "$U_AITER"
 sync_key MORI_BRANCH  "$U_MORI"
+sync_key VLLM_REF     "$REF"
 
-# Keys that need human-readable hints rather than blind copy:
-HINTS=()
-[ -n "$U_BASE" ]    && HINTS+=("BASE_IMAGE: upstream uses '$U_BASE' (Ubuntu). Set your Debian BASE_IMAGE + ROCM_VERSION/ROCM_PATH_VERSION to the matching ROCm.")
-[ -n "$U_PYTORCH" ] && HINTS+=("PYTORCH: upstream builds torch from branch '$U_PYTORCH'. Pick the matching torch wheel for TORCH_SPEC/TORCH_INDEX_URL.")
-[ -n "$U_TRITON" ]  && HINTS+=("TRITON: upstream pins triton '$U_TRITON' (we inherit triton via the torch wheel; usually no action).")
+# --- derive values from upstream strings -----------------------------------
+# These are computed mechanically from upstream BASE_IMAGE + PYTORCH_BRANCH.
+# The derivations are deterministic: ROCM_VERSION / ROCM_PATH_VERSION /
+# TORCH_INDEX_URL are always correct. TORCH_SPEC assumes patch version .0
+# (which is the norm); the verify command below catches exceptions.
+declare -A DERIVED
+ROCM_FULL=""; ROCM_CHANNEL=""; ROCM_PATH=""
+if [ -n "$U_BASE" ]; then
+  # e.g. rocm/dev-ubuntu-22.04:7.2.2-complete -> 7.2.2
+  ROCM_FULL="$(echo "$U_BASE" | sed -nE 's/.*:([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p')"
+  if [ -n "$ROCM_FULL" ]; then
+    ROCM_CHANNEL="$(echo "$ROCM_FULL" | cut -d. -f1,2)"      # 7.2  (apt/index)
+    if [ "$(echo "$ROCM_FULL" | tr -cd '.' | wc -c)" -eq 2 ]; then
+      ROCM_PATH="$ROCM_FULL"                                  # already X.Y.Z
+    else
+      ROCM_PATH="${ROCM_FULL}.0"                              # X.Y -> X.Y.0
+    fi
+    [[ -v CUR[ROCM_VERSION] ]]      && DERIVED[ROCM_VERSION]="$ROCM_CHANNEL"
+    [[ -v CUR[ROCM_PATH_VERSION] ]] && DERIVED[ROCM_PATH_VERSION]="$ROCM_PATH"
+    [[ -v CUR[TORCH_INDEX_URL] ]]   && DERIVED[TORCH_INDEX_URL]="https://download.pytorch.org/whl/rocm${ROCM_CHANNEL}"
+  fi
+fi
+# torch series from the PYTORCH_BRANCH trailing comment, e.g. "release/2.12"
+TORCH_SERIES="$(grep -hE '^ARG[[:space:]]+PYTORCH_BRANCH=' "$TMPDIR/base" 2>/dev/null \
+                | head -1 | sed -nE 's/.*release\/([0-9]+\.[0-9]+).*/\1/p')"
+if [ -n "$TORCH_SERIES" ] && [ -n "$ROCM_CHANNEL" ] && [[ -v CUR[TORCH_SPEC] ]]; then
+  DERIVED[TORCH_SPEC]="torch==${TORCH_SERIES}.0+rocm${ROCM_CHANNEL}"
+fi
+# Merge derived values into NEW so they appear in the output file
+for k in "${!DERIVED[@]}"; do NEW["$k"]="${DERIVED[$k]}"; done
+
+# Build a TORCH_SPEC verification command for the report
+TORCH_VERIFY_CMD=""
+if [ -n "${DERIVED[TORCH_SPEC]:-}" ] && [ -n "${DERIVED[TORCH_INDEX_URL]:-}" ]; then
+  TORCH_VERIFY_CMD="pip install --dry-run ${DERIVED[TORCH_SPEC]} --index-url ${DERIVED[TORCH_INDEX_URL]}"
+fi
 
 # --- detect GPU-arch keys we are intentionally preserving ------------------
 ARCH_KEYS=()
@@ -135,7 +168,9 @@ OUT="$GENERIC_DIR/$VERSION/versions.env.new"
     if [[ "$stripped" == *=* ]]; then
       key="$(echo "${stripped%%=*}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     fi
-    if [ -n "$key" ] && [[ -v NEW["$key"] ]] && [ "${NEW[$key]}" != "${CUR[$key]}" ]; then
+    if [ -n "$key" ] && [[ -v DERIVED["$key"] ]] && [ "${DERIVED[$key]}" != "${CUR[$key]}" ]; then
+      echo "${key}=${DERIVED[$key]}    # derived from upstream@$REF — verify (was ${CUR[$key]})"
+    elif [ -n "$key" ] && [[ -v NEW["$key"] ]] && [ "${NEW[$key]}" != "${CUR[$key]}" ]; then
       echo "${key}=${NEW[$key]}    # synced from upstream@$REF (was ${CUR[$key]})"
     elif [ -n "$key" ]; then
       # preserve arch keys with an inline reminder
@@ -155,16 +190,41 @@ echo ""
 echo "================================================================================"
 info "Proposed update written to: $OUT"
 echo ""
-echo "SYNCED component pins (review against upstream release notes):"
-for k in FA_BRANCH AITER_BRANCH MORI_BRANCH; do
+echo "SYNCED component pins (directly from upstream ARGs):"
+for k in FA_BRANCH AITER_BRANCH MORI_BRANCH VLLM_REF; do
   if [[ -v CUR["$k"] ]] && [ "${NEW[$k]}" != "${CUR[$k]}" ]; then
     echo "  [~] $k: ${CUR[$k]} -> ${NEW[$k]}"
   fi
 done
 
 echo ""
-echo "MANUAL hints (upstream changed things that need a human decision):"
-for h in "${HINTS[@]}"; do echo "  [!] $h"; done
+echo "DERIVED values (computed from upstream BASE_IMAGE + PYTORCH_BRANCH):"
+_any_der=0
+for k in ROCM_VERSION ROCM_PATH_VERSION TORCH_INDEX_URL TORCH_SPEC; do
+  if [[ -v DERIVED["$k"] ]] && [ "${DERIVED[$k]}" != "${CUR[$k]:-}" ]; then
+    echo "  [~] $k: ${CUR[$k]:-<unset>} -> ${DERIVED[$k]}"
+    _any_der=1
+  fi
+done
+[ "$_any_der" -eq 0 ] && echo "  (none — upstream base/torch unchanged or unparseable)"
+if [ -n "$TORCH_VERIFY_CMD" ]; then
+  echo ""
+  echo "TORCH_SPEC verification (run in a container with the ROCm index):"
+  echo "  $TORCH_VERIFY_CMD"
+fi
+if [ -n "$U_PYTORCH" ]; then
+  echo ""
+  echo "Upstream builds torch from: $U_PYTORCH"
+  echo "We install a pre-built wheel instead (TORCH_SPEC above)."
+fi
+if [ -n "$U_TRITON" ]; then
+  echo "Upstream pins triton: $U_TRITON (we inherit triton via the torch wheel)."
+fi
+if [ -n "$U_BASE" ]; then
+  echo ""
+  echo "Upstream base image: $U_BASE (Ubuntu)"
+  echo "We use Debian — keep BASE_IMAGE=debian:bookworm-<date>, set the snapshot date manually."
+fi
 
 echo ""
 echo "PRESERVED GPU-arch keys (NOT auto-synced — confirm vs MI210/MI300X/MI350):"
