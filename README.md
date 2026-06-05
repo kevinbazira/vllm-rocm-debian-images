@@ -12,6 +12,32 @@ While AMD-maintained images offer deep hardware-specific tuning and patches, the
 
 This repo provides optimized, production-ready Dockerfiles to build Debian-based (Bookworm) images for running vLLM on AMD Instinct GPUs.
 
+## Repository Structure
+
+```
+vllm-rocm-debian-images/
+├── generic/                  # Generalized Dockerfiles (public Debian, AMD repos)
+│   ├── vllm0.14-rocm7.0.0/
+│   │   └── Dockerfile
+│   └── vllm0.8.5-rocm6.3.0/
+│       └── Dockerfile
+├── wmf/                      # WMF-specific Dockerfile.template files
+│   ├── vllm014/
+│   │   └── Dockerfile.template
+│   └── vllm085/
+│       └── Dockerfile.template
+├── scripts/                  # Automation tools for the upgrade pipeline
+│   ├── check-upstream.sh     # Diff upstream Dockerfiles against our snapshot
+│   ├── scaffold-version.sh   # Bootstrap a new version directory
+│   └── generate-wmf-template.sh  # Convert generic → WMF template
+├── upstream/                 # Saved snapshots of upstream vLLM Dockerfiles
+├── docs/
+│   └── upgrade-runbook.md    # Step-by-step upgrade procedure
+└── README.md
+```
+
+**Workflow:** New versions start in `generic/` (public deps, portable), then get converted into `wmf/` templates for the Wikimedia Docker registry. See [docs/upgrade-runbook.md](docs/upgrade-runbook.md) for the full procedure.
+
 ## Key Features
 
 These Dockerfiles are generalized from production configurations used in enterprise ML environments, featuring:
@@ -21,10 +47,10 @@ These Dockerfiles are generalized from production configurations used in enterpr
 
 ## Supported Versions
 
-| Directory | vLLM Version | ROCm Version | PyTorch Version | Base OS | Ported Dockerfiles |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-|[`vllm0.14-rocm7.0.0/`](vllm0.14-rocm7.0.0/) | `0.14.0` | `7.0.0` | `2.10.0+rocm7.0` | Bookworm | [Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/6c006457123f802d78e0570471ee8ea2d2a87dfb/docker/Dockerfile.rocm_base), [Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/6c006457123f802d78e0570471ee8ea2d2a87dfb/docker/Dockerfile.rocm) |
-|[`vllm0.8.5-rocm6.3.0/`](vllm0.8.5-rocm6.3.0/) | `0.8.5` | `6.3.1` | `2.8.0+rocm6.3` | Bookworm | [Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/ed6cfb90c8ad13e77dcbfa0e211075a3e2f1ee7e/docker/Dockerfile.rocm_base), [Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/ed6cfb90c8ad13e77dcbfa0e211075a3e2f1ee7e/docker/Dockerfile.rocm) |
+| Directory | vLLM Version | ROCm Version | PyTorch Version | Base OS | Ported Dockerfiles | WMF Template |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+|[`generic/vllm0.14-rocm7.0.0/`](generic/vllm0.14-rocm7.0.0/) | `0.14.0` | `7.0.0` | `2.10.0+rocm7.0` | Bookworm | [Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/6c006457123f802d78e0570471ee8ea2d2a87dfb/docker/Dockerfile.rocm_base), [Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/6c006457123f802d78e0570471ee8ea2d2a87dfb/docker/Dockerfile.rocm) | [wmf/vllm014/](wmf/vllm014/) |
+|[`generic/vllm0.8.5-rocm6.3.0/`](generic/vllm0.8.5-rocm6.3.0/) | `0.8.5` | `6.3.1` | `2.8.0+rocm6.3` | Bookworm | [Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/ed6cfb90c8ad13e77dcbfa0e211075a3e2f1ee7e/docker/Dockerfile.rocm_base), [Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/ed6cfb90c8ad13e77dcbfa0e211075a3e2f1ee7e/docker/Dockerfile.rocm) | [wmf/vllm085/](wmf/vllm085/) |
 
 ---
 
@@ -38,7 +64,7 @@ To build the vllm-rocm-debian image locally, point the Docker build context to t
 # Example: Building the 2026 stack (vLLM 0.14 / ROCm 7.0)
 $ time docker build --network=host \
   -t vllm-rocm-debian:vllm0.14-rocm7.0.0 \
-  ./vllm0.14-rocm7.0.0
+  ./generic/vllm0.14-rocm7.0.0
 
 ...
 Removing intermediate container ac3898f0ad3a
@@ -124,6 +150,38 @@ Congratulations on successfully building and running the model-server. This is o
 * `--max-num-batched-tokens=32768`: Matches the model length to ensure the engine can process at least one full-length article/document in a single pass, or efficiently pack hundreds of shorter search queries together. Leaving this at the lower default can bottleneck throughput.
 * `--enable-prefix-caching=False`: Disabled because embedding/search workloads typically process highly unique documents with little to no shared prompt overlap. Disabling it avoids unnecessary memory tracking overhead and frees up KV cache space for larger batches.
 * `--trust-remote-code=False`: A strict security best practice for production environments. Models should be loaded from secure internal object storage (e.g Ceph/Swift) rather than directly downloading and executing arbitrary code from the HuggingFace repos at runtime.
+
+## Upgrade Pipeline
+
+This repository follows a **generic-first, WMF-second** workflow to keep pace with upstream vLLM releases:
+
+```
+upstream vLLM release  →  generic/<version>/Dockerfile  →  wmf/<short>/Dockerfile.template  →  WMF registry
+```
+
+### Quick start for a new version
+
+```bash
+# 1. Check what changed upstream since our last port
+./scripts/check-upstream.sh main
+
+# 2. Scaffold a new version directory
+./scripts/scaffold-version.sh vllm0.15-rocm7.0.0
+
+# 3. Edit the Dockerfile (apply upstream changes, update versions)
+vim generic/vllm0.15-rocm7.0.0/Dockerfile
+
+# 4. Build and smoke test
+docker build --network=host -t vllm-rocm-debian:vllm0.15-rocm7.0.0 ./generic/vllm0.15-rocm7.0.0
+
+# 5. Generate the WMF template
+./scripts/generate-wmf-template.sh vllm0.15-rocm7.0.0
+
+# 6. Save the upstream baseline
+./scripts/check-upstream.sh --save
+```
+
+See **[docs/upgrade-runbook.md](docs/upgrade-runbook.md)** for the complete procedure including WMF APT mirror updates, ml-lab testing, and Gerrit deployment steps.
 
 ## Final Note
 
