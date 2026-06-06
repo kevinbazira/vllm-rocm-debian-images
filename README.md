@@ -29,9 +29,9 @@ This repo provides optimized, production-ready Dockerfiles to build Debian-based
 
 | Directory | vLLM | ROCm | Build method | Base OS | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`generic/vllm0.22-rocm7.2.2/`](generic/vllm0.22-rocm7.2.2/) | `0.22.1` | `7.2.2` | Prebuilt ROCm wheel | Bookworm | **Recommended** |
-| [`generic/vllm0.14-rocm7.0.0/`](generic/vllm0.14-rocm7.0.0/) | `0.14.0` | `7.0.0` | Source build | Bookworm | Deprecated |
-| [`generic/vllm0.8.5-rocm6.3.0/`](generic/vllm0.8.5-rocm6.3.0/) | `0.8.5` | `6.3.1` | Source build | Bookworm | Deprecated |
+| [`vllm0.22-rocm7.2.2/`](vllm0.22-rocm7.2.2/) | `0.22.1` | `7.2.2` | Prebuilt ROCm wheel | Bookworm | **Recommended** |
+| [`vllm0.14-rocm7.0.0/`](vllm0.14-rocm7.0.0/) | `0.14.0` | `7.0.0` | Source build | Bookworm | Deprecated |
+| [`vllm0.8.5-rocm6.3.0/`](vllm0.8.5-rocm6.3.0/) | `0.8.5` | `6.3.1` | Source build | Bookworm | Deprecated |
 
 ---
 
@@ -46,7 +46,7 @@ Point the build context at the desired version's directory. The wheel-based buil
 ```bash
 $ time docker build --network=host \
   -t vllm-rocm-debian:vllm0.22-rocm7.2.2 \
-  ./generic/vllm0.22-rocm7.2.2
+  ./vllm0.22-rocm7.2.2
 
 ...
 Successfully built 703874eb4942
@@ -60,7 +60,7 @@ real    11m42.156s
 ```bash
 $ time docker build --network=host \
   -t vllm-rocm-debian:vllm0.14-rocm7.0.0 \
-  ./generic/vllm0.14-rocm7.0.0
+  ./vllm0.14-rocm7.0.0
 
 ...
 Successfully built c7340bc54fb5
@@ -125,7 +125,7 @@ a8a7bfe66c2c   16 hours ago   /bin/sh -c #(nop)  ARG APT_PREF=Package: *\n…   
 ...
 ```
 
-In case a layer exceeds the docker hub/registry's layer limit size, you can use multi-stage chunking approach shown in: [`generic/vllm0.14-rocm7.0.0/`](generic/vllm0.14-rocm7.0.0/) to keep individual layer sizes optimized.
+In case a layer exceeds the docker hub/registry's layer limit size, you can use multi-stage chunking approach shown in: [`vllm0.14-rocm7.0.0/`](vllm0.14-rocm7.0.0/) to keep individual layer sizes optimized.
 
 
 ### 3. Run inference
