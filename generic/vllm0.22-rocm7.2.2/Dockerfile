@@ -1,13 +1,27 @@
 ########################################################################
 # debian-vllm-image: ROCm + vLLM (pre-built wheel)                     #
 #                                                                      #
+# The vLLM 0.22 pre-built wheel bundels:                               #
+# PyTorch, MoRi, FlashAttention, aiter, vLLM                           #
+#                                                                      #
 # Note: Multiple RUN commands are intentionally kept separate to avoid #
 # hitting the 4GB (compressed) Docker layer limit required by the      #
-# Wikimedia Docker registry.                                           #
+# Wikimedia Docker registry. (T426766#11951605)                        #
 ########################################################################
 
-ARG BASE_IMAGE=debian:bookworm-20260112
+# Global version manifest. Bump these for upgrades.
+ARG BASE_IMAGE=debian:bookworm-20260518
+ARG VLLM_VERSION=0.22.1
+ARG ROCM_VARIANT=rocm722
+ARG ROCM_APT_VERSION=7.2
+ARG ROCM_PATH_VERSION=7.2.2
+ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942
+
 FROM ${BASE_IMAGE} AS builder
+
+# Inherit global version defaults
+ARG VLLM_VERSION
+ARG ROCM_VARIANT
 
 WORKDIR /srv
 
@@ -19,8 +33,6 @@ RUN apt-get update -q \
 
 # Create Python 3.12 venv using uv-managed CPython.
 # The vLLM ROCm pre-built wheels require Python 3.12 (cp312 ABI).
-ARG VLLM_VERSION
-ARG ROCM_VARIANT
 RUN uv venv /srv/venv --python 3.12 --seed --managed-python
 
 # Install vLLM from the pre-built ROCm wheel.
@@ -39,6 +51,11 @@ RUN uv pip install amdsmi --python /srv/venv
 
 FROM ${BASE_IMAGE} AS runtime
 
+# Inherit global version defaults
+ARG ROCM_APT_VERSION
+ARG ROCM_PATH_VERSION
+ARG PYTORCH_ROCM_ARCH
+
 # Mirror upstream: pin ROCm packages and create 'render' group
 ARG APT_PREF="Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600"
 RUN groupadd -g 109 render \
@@ -48,7 +65,6 @@ WORKDIR /srv
 
 # Add AMD ROCm repository and install minimal runtime libs.
 # build-essential provides gcc for triton HIP kernel JIT compilation.
-ARG ROCM_APT_VERSION
 RUN apt-get update -q \
     && apt-get install -q -y --no-install-recommends gnupg ca-certificates curl \
     && mkdir -p /etc/apt/keyrings \
@@ -67,8 +83,6 @@ COPY --from=builder /srv/venv /srv/venv
 COPY --from=builder /root/.local/share/uv/python /root/.local/share/uv/python
 
 # Set environment for ROCm and vLLM
-ARG ROCM_PATH_VERSION
-ARG PYTORCH_ROCM_ARCH
 ENV ROCM_PATH=/opt/rocm-${ROCM_PATH_VERSION} \
     VLLM_TARGET_DEVICE=rocm \
     PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH} \
