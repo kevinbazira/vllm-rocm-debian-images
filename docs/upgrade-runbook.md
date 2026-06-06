@@ -387,3 +387,133 @@ git commit -m "add support for <version>"
 | AITER JIT OOM during startup | Concurrent JIT compilation exhausts RAM | Set `MAX_JOBS=1` in the container environment |
 | Model loads but inference is slow | AITER not being used | Set `VLLM_ROCM_USE_AITER=1` and `VLLM_USE_TRITON_FLASH_ATTN=0` |
 | `amdgpu.ids: No such file or directory` | Missing firmware package (benign warning) | Can be safely ignored; only affects GPU identification strings |
+
+---
+
+## Appendix: Prebuilt-Wheel Investigation (closed — source build remains default)
+
+**Date:** 2026-06-05 · **Box:** ml-lab1002 (2× AMD Instinct MI210, gfx90a) · **Verdict:** prebuilt wheels cannot replace the source build on the WMF stack today. Keep `INSTALL_METHOD=source`.
+
+### Question
+
+The vLLM release page advertises a one-line install:
+`uv pip install vllm==X --extra-index-url https://wheels.vllm.ai/rocm/X/rocmYZZ`.
+If that worked on a WMF base image it would replace the ~4 hr source build (mori → FA → aiter → vllm) with a ~20 min wheel pull. This appendix records why it does **not** work, so the spike isn't repeated.
+
+### Two independent blockers
+
+1. **The abi3 wheel served under `…/rocm<ver>/` is the CUDA build, not ROCm.**
+   The per-version "view" `https://wheels.vllm.ai/rocm/0.22.1/rocm722/` serves `vllm-0.22.1-cp38-abi3-…whl`. Its compiled extensions are CUDA-built:
+   ```
+   _C.abi3.so  _C_stable_libtorch.abi3.so  _moe_C.abi3.so  _flashmla_C.abi3.so  cumem_allocator.abi3.so
+   ```
+   There is **no `_rocm_C.abi3.so`**. On an AMD box every extension fails to load:
+   ```
+   Failed to import from vllm._C with ImportError('libcudart.so.13: cannot open shared object file')
+   Failed to import from vllm._rocm_C with ModuleNotFoundError("No module named 'vllm._rocm_C'")
+   ```
+   The wheel's true dependency closure is the CUDA stack (`torch==2.11.0` plain, `nvidia-*-cu13`, `flashinfer`) — confirming it is the CUDA artifact mislabeled by path.
+
+2. **The genuine ROCm wheel is cp312-only.**
+   The real ROCm artifact in the index is `vllm-0.22.1+rocm722-cp312` (in `rocm/vllm/`). WMF base images ship the distro-default Python: `python3-bookworm` = 3.11, `python3-trixie` = 3.13. Neither is cp312, and there is no precedent for a source-built/non-default Python in the base images. So the only real ROCm wheel can't be consumed.
+
+Neither blocker is fixable by configuration. `VLLM_ROCM_USE_AITER` etc. are runtime kernel toggles that presuppose `_rocm_C` is already loaded; they are not platform-detection overrides. The `RuntimeError: Device string must not be empty` seen during `LLM(...)` is a downstream symptom of the missing ROCm extension, not an independent bug.
+
+### What the spike *did* establish (keep for future use)
+
+- ROCm 7.2 installs cleanly on `python3-bookworm` from `repo.radeon.com`. Use `rocm/apt/7.2 jammy main` only — the `amdgpu/7.2/ubuntu jammy` repo returns 404 on its Release file and is not needed (`rm /etc/apt/sources.list.d/amdgpu.list` after adding it).
+- `torch==2.12.0+rocm7.2` (and `2.11.0+rocm7.2`) exist as **cp311** and **cp313** wheels at `download.pytorch.org/whl/rocm7.2`. `torch==2.10.0+rocm7.2` does **not** exist there — do not pin it. Installed torch reports `hip 7.2.53211`, `cuda None`, sees both MI210s.
+- ROCm 7.2 is **not** in the WMF APT mirror (only amd-rocm63, amd-rocm70 are imported). A prebuilt mode would require an SRE puppet/aptrepo import of 7.2 for production.
+
+### Re-evaluation trigger (when to revisit)
+
+The prebuilt path becomes worth re-testing only if **both** hold:
+1. Upstream publishes a `+rocm` wheel built for the base's actual Python (cp311 or cp313). Probe:
+   ```bash
+   curl -s https://wheels.vllm.ai/rocm/vllm/ | grep -oE 'cp3[0-9]+|abi3'
+   ```
+2. SRE imports the matching ROCm runtime into the WMF APT mirror.
+
+If both are ever true, a known-good test recipe is: bookworm container → add `rocm/apt/7.2 jammy` → `pip install torch==<ver>+rocm7.2` (rocm index) → `pip install vllm==<ver> --no-deps` (rocm index) → verify `import vllm._rocm_C` succeeds and `LLM('facebook/opt-125m').generate(...)` runs on the MI210. The `generate-wmf-template.sh` transform needs no change — the WMF deltas (base image, apt mirror, proxy, USER, chunker) are orthogonal to install method, so a future `prebuilt` mode slots into `versions.env` without touching the WMF templating.
+
+Until both triggers fire, prebuilt is a research note, not a pipeline mode.
+
+---
+
+## Appendix B: Prebuilt-Wheel Re-investigation with uv-managed Python 3.12 (2026-06-06)
+
+**Verdict:** the prebuilt ROCm wheel path now WORKS end-to-end (generates tokens on MI210), but is **not production-viable today** — it depends on the same single gate as before (ROCm 7.2 in the WMF APT mirror) plus several non-sanctioned assembly steps. Source build remains the default. This appendix supersedes the re-evaluation trigger in Appendix A.
+
+### What changed since Appendix A
+
+Appendix A concluded the wheel path was blocked by two things: (1) the abi3 wheel served to Python 3.11 was the CUDA build, and (2) the genuine ROCm wheel was cp312-only. Trigger #1 in Appendix A ("upstream publishes a cp311/cp313 +rocm wheel") has NOT happened and per upstream docs will not — ROCm wheels are cp312-only by design. **However**, the cp312 constraint is defeatable with `uv`'s managed standalone Python, which Appendix A did not consider.
+
+### Proven working recipe (on `python3-bookworm`, MI210/gfx90a)
+
+```bash
+# 1. ROCm 7.2 runtime from repo.radeon.com (NOT in WMF mirror — see gate below)
+apt-get install -y gnupg ca-certificates curl
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor > /etc/apt/keyrings/rocm.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2 jammy main" \
+  > /etc/apt/sources.list.d/rocm.list
+apt-get update && apt-get install -y rocm-libs miopen-hip rccl rocrand
+
+# 2. System libs the wheel's binaries link against
+apt-get install -y libopenmpi3 libopenmpi-dev   # libmpi_cxx.so.40
+apt-get install -y build-essential               # runtime Triton JIT needs a C/C++ compiler
+
+# 3. uv-managed Python 3.12 (defeats the cp312-only constraint without a 3.12 base)
+pip install uv --break-system-packages
+uv venv /tmp/v312 --python 3.12 --seed --managed-python
+
+# 4. The genuine ROCm wheel now resolves (cp312, +rocm722 local tag)
+uv pip install vllm==0.22.1 --python /tmp/v312 \
+  --extra-index-url https://wheels.vllm.ai/rocm/0.22.1/rocm722 \
+  --index-strategy unsafe-best-match
+
+# 5. Verify: _rocm_C.abi3.so present, import OK, and inference runs
+/tmp/v312/bin/python -c "
+from vllm import LLM, SamplingParams
+llm = LLM(model='facebook/opt-125m', max_model_len=2048)
+out = llm.generate(['The capital of France is'], SamplingParams(max_tokens=8))
+print('GENERATE OK:', out[0].outputs[0].text)"
+```
+
+Confirmed result: `_rocm_C.abi3.so` present (the marker absent from the CUDA wheel in Appendix A), `import OK`, model loads on MI210, `torch.compile` succeeds in ~5s, `GENERATE OK` with real tokens.
+
+### Key findings from this run
+
+- **The cp312 block is real but `uv --managed-python` bypasses it.** uv downloads a standalone CPython 3.12 independent of the distro, so a bookworm-3.11 / trixie-3.13 base can host the cp312 wheel. The Python-version half of the problem is solved.
+- **A real `0.22.1+rocm722` ROCm wheel exists.** Appendix A's reading of the upstream docs table (which lists only rocm700→0.18.0 and rocm721→nightly) implied stable wheels cap at 0.18.0. That was wrong — the per-version index `wheels.vllm.ai/rocm/0.22.1/rocm722/` serves a genuine cp312 ROCm wheel. The docs table is not the whole story; probe the per-version index directly.
+- **"Prebuilt" does NOT mean "no compilation."** vLLM's `torch.compile`/Inductor path JIT-compiles Triton kernels at runtime (observed: `_compute_slot_mapping_kernel`, `_fwd_kernel`). The wheel ships AOT-compiled C++ kernels (`_rocm_C.abi3.so`) but still requires a C/C++ compiler present at inference time. The "outsource the 4-hour build" benefit is real only for the AOT portion; the image must still ship `build-essential`.
+- **The wheel needs a full ROCm 7.2 host runtime it does not carry.** Missing-`.so` cascade: `libmpi_cxx.so.40` (OpenMPI) → `libroctx64.so.4` (roctracer, ROCm 7.2). The wheel assumes ROCm 7.2 is already installed on the host.
+
+### The single production gate (unchanged)
+
+Everything above used **non-WMF-sanctioned** components: ROCm 7.2 from `repo.radeon.com` (not the WMF mirror), and a uv-managed Python 3.12 (not a sanctioned base). For production both must be sanctioned. The binding gate is the same as Appendix A: **SRE must import ROCm 7.2 into the WMF APT mirror** (only amd-rocm63, amd-rocm70 are imported today). The Python-3.12 question becomes a second gate (sanctioned 3.12 base, or sanctioned use of uv-managed Python) — note bookworm is 3.11 and trixie is 3.13, so 3.12 is neither distro default.
+
+### Decision criteria for when the ROCm-7.2 mirror import lands
+
+At that point, wheel-vs-source is a genuine tradeoff to evaluate — NOT an automatic switch:
+
+| Factor | Prebuilt wheel | Source build (current) |
+| --- | --- | --- |
+| Build time | Minutes (wheel pull) | ~4 hours (compile) |
+| Python | Needs sanctioned 3.12 (non-default) | Builds on base's Python (3.11/3.13) |
+| Runtime compiler | Required (Triton JIT) | Required anyway | 
+| ROCm runtime | Must assemble on base | Assembled by Dockerfile.rocm_base |
+| WMF integration | New: base, chunker, USER, mirror all need rework | Already integrated |
+| Version ceiling | Whatever upstream publishes a cp312 +rocm wheel for | Any version (compiles from source) |
+| gfx90a coverage | Depends on wheel's built arches | Controlled via PYTORCH_ROCM_ARCH |
+
+The wheel saves compile time; the source build saves base-assembly and governance rework and removes the cp312/Python constraint. The pipeline (extract → verify → declared-deltas → fail-closed) is built around source and needs no change. If the wheel path is ever adopted, it slots in as an alternate `INSTALL_METHOD` in `versions.env`; the WMF deltas (base, mirror, proxy, USER, chunker) are orthogonal to install method.
+
+### Probe to re-confirm in future
+
+```bash
+# does a genuine cp312 +rocm wheel exist for version X / rocmYZZ?
+curl -s https://wheels.vllm.ai/rocm/<X>/rocm<YZZ>/vllm/ | grep -oE 'vllm-[^"<]*\.whl'
+# is ROCm 7.2 (or target) now in the WMF mirror?
+apt-cache policy | grep -i amd-rocm
+```
